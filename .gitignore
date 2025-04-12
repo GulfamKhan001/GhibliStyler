@@ -1,0 +1,43 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
+.env
+
+# Temporary files
+tmp/
+/tmp/
+*.tmp
+
+# Project specific
+/frames/
+/styled-frames/
+*.mp4
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Dependencies lock files
+package-lock.json
+yarn.lock
+uv.lock
