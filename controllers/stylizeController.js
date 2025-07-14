@@ -3,6 +3,9 @@ const fs = require('fs-extra');
 const sharp = require('sharp');
 const { processedVideos } = require('./downloadController');
 const fileManager = require('../utils/fileManager');
+const axios = require('axios');
+const FormData = require('form-data');
+const os = require('os');
 
 /**
  * Applies a Ghibli-style filter to extracted frames
@@ -52,28 +55,25 @@ exports.stylizeFrames = async (req, res) => {
     }
 
     // Process each frame
-    const stylizePromises = pngFrames.map(async (frameFile, index) => {
-      const inputPath = path.join(framesDir, frameFile);
-      const outputPath = path.join(styledFramesDir, frameFile);
-
-      // Apply stylization effects
-      // Here we're doing some simple effects to mimic Ghibli style as a placeholder
-      await sharp(inputPath)
-        // Increase saturation and apply soft contrast
-        .modulate({ saturation: 1.4, brightness: 1.05 })
-        // Add slight blur for that hand-drawn feel
-        .blur(0.3)
-        // Ghibli films often have a warm color temperature
-        .tint({ r: 255, g: 240, b: 230 })
-        // Save the stylized frame
-        .toFile(outputPath);
-
-      // Report progress every 10% of frames
-      if (index % Math.max(1, Math.floor(pngFrames.length / 10)) === 0) {
-        const progress = Math.floor((index / pngFrames.length) * 100);
-        console.log(`Stylizing progress: ${progress}%`);
+    for (let index = 0; index < pngFrames.length; index++) {
+      if (index % 10 === 0) {
+        const frameFile = pngFrames[index];
+        const inputPath = path.join(framesDir, frameFile);
+        const outputPath = path.join(styledFramesDir, frameFile);
+    
+        await stylizeFrameWithOpenAI(inputPath, outputPath);
+    
+        // Wait 2-5 seconds before next API call
+        const waitMs = 2000 + Math.floor(Math.random() * 3000);
+        await new Promise(res => setTimeout(res, waitMs));
+    
+        // Report progress every 10%
+        if (index % Math.max(1, Math.floor(pngFrames.length / 10)) === 0) {
+          const progress = Math.floor((index / pngFrames.length) * 100);
+          console.log(`Stylizing progress: ${progress}%`);
+        }
       }
-    });
+    }
 
     // Wait for all stylization operations to complete
     await Promise.all(stylizePromises);
@@ -99,3 +99,60 @@ exports.stylizeFrames = async (req, res) => {
     });
   }
 };
+
+async function stylizeFrameWithOpenAI(inputPath, outputPath, retries = 3) {
+  // Ensure PNG and 512x512
+  const tempPngPath = path.join(
+    os.tmpdir(),
+    `ghibli-stylizer-tmp-${Date.now()}-${Math.random().toString(36).slice(2)}.png`
+  );
+  await sharp(inputPath)
+    .resize(512, 512, { fit: 'cover' })
+    .png()
+    .toFile(tempPngPath);
+
+  try {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const form = new FormData();
+        form.append('image', fs.createReadStream(tempPngPath));
+        form.append('n', 1);
+        form.append('size', '512x512');
+
+        const response = await axios.post(
+          'https://api.openai.com/v1/images/variations',
+          form,
+          {
+            headers: {
+              ...form.getHeaders(),
+              'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+            }
+          }
+        );
+
+        const stylizedImageUrl = response.data.data[0].url;
+        const stylizedImage = await axios.get(stylizedImageUrl, { responseType: 'arraybuffer' });
+        fs.writeFileSync(outputPath, stylizedImage.data);
+        // Clean up temp file
+        await fs.remove(tempPngPath);
+        return;
+      } catch (err) {
+        if (err.response && err.response.status === 429) {
+          const retryAfter = err.response.headers['retry-after'];
+          const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 10000;
+          console.warn(`Rate limited by OpenAI (429). Waiting ${waitTime / 1000}s before retrying...`);
+          await new Promise(res => setTimeout(res, waitTime));
+        } else {
+          console.error(`Error stylizing frame (attempt ${attempt}):`, err.message, err.response?.data);
+          if (attempt === retries) throw err;
+          await new Promise(res => setTimeout(res, 2000 * attempt));
+        }
+      }
+    }
+  }finally {
+    // Clean up temp file
+    if (await fs.pathExists(tempPngPath)) {
+      await fs.remove(tempPngPath);
+    }
+  }
+}

@@ -6,6 +6,7 @@ const extractRoutes = require('./routes/extract');
 const stylizeRoutes = require('./routes/stylize');
 const reassembleRoutes = require('./routes/reassemble');
 const fileManager = require('./utils/fileManager');
+require('dotenv').config();
 
 // Initialize Express app
 const app = express();
@@ -17,12 +18,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // Ensure temp directories exist
 fileManager.setupDirectories();
-
-// Routes
-app.use('/download', downloadRoutes);
-app.use('/extract-frames', extractRoutes);
-app.use('/stylize-frame', stylizeRoutes);
-app.use('/reassemble', reassembleRoutes);
+console.log('API', process.env.OPENAI_API_KEY);
 
 // Basic route for checking if the API is up
 app.get('/', (req, res) => {
@@ -30,6 +26,18 @@ app.get('/', (req, res) => {
     status: 'success',
     message: 'Ghibli-Style YouTube Video Stylizer API is running'
   });
+});
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(
+      `${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`
+    );
+  });
+  next();
 });
 
 // Error handling middleware
@@ -41,6 +49,12 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? err : {}
   });
 });
+
+// Routes
+app.use('/download', downloadRoutes);
+app.use('/extract-frames', extractRoutes);
+app.use('/stylize-frame', stylizeRoutes);
+app.use('/reassemble', reassembleRoutes);
 
 // Start the server
 app.listen(PORT, '0.0.0.0', () => {
