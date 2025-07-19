@@ -54,24 +54,22 @@ exports.stylizeFrames = async (req, res) => {
       });
     }
 
-    // Process each frame
-    for (let index = 0; index < pngFrames.length; index++) {
-      if (index % 10 === 0) {
-        const frameFile = pngFrames[index];
-        const inputPath = path.join(framesDir, frameFile);
-        const outputPath = path.join(styledFramesDir, frameFile);
-    
-        await stylizeFrameWithOpenAI(inputPath, outputPath);
-    
-        // Wait 2-5 seconds before next API call
-        const waitMs = 2000 + Math.floor(Math.random() * 3000);
-        await new Promise(res => setTimeout(res, waitMs));
-    
-        // Report progress every 10%
-        if (index % Math.max(1, Math.floor(pngFrames.length / 10)) === 0) {
-          const progress = Math.floor((index / pngFrames.length) * 100);
-          console.log(`Stylizing progress: ${progress}%`);
-        }
+    const stylizePromises = [];
+    const framesToStylize = [pngFrames[20]]; // Only process one frame for testing
+    // const framesToStylize = pngFrames.filter((_, index) => index % 10 === 0);
+
+    for (let i = 0; i < framesToStylize.length; i++) {
+      const frameFile = framesToStylize[i];
+      const inputPath = path.join(framesDir, frameFile);
+      const outputPath = path.join(styledFramesDir, frameFile);
+
+      // Start the stylization promise (do not await here)
+      stylizePromises.push(stylizeFrameWithRunPod(inputPath, outputPath));
+
+      // Optional: log progress as requests are sent
+      if (i % Math.max(1, Math.floor(framesToStylize.length / 10)) === 0) {
+        const progress = Math.floor((i / framesToStylize.length) * 100);
+        console.log(`Stylization request sent: ${progress}%`);
       }
     }
 
@@ -100,59 +98,77 @@ exports.stylizeFrames = async (req, res) => {
   }
 };
 
-async function stylizeFrameWithOpenAI(inputPath, outputPath, retries = 3) {
-  // Ensure PNG and 512x512
-  const tempPngPath = path.join(
-    os.tmpdir(),
-    `ghibli-stylizer-tmp-${Date.now()}-${Math.random().toString(36).slice(2)}.png`
-  );
-  await sharp(inputPath)
-    .resize(512, 512, { fit: 'cover' })
-    .png()
-    .toFile(tempPngPath);
+const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY;
+const RUNPOD_ENDPOINT = 'https://api.runpod.ai/v2/m13tzh4qxiu26g';
+
+// Ensure global.fetch is available (Node.js)
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+
+async function stylizeFrameWithRunPod(inputPath, outputPath) {
+  const imageBase64 = fs.readFileSync(inputPath, { encoding: 'base64' });
+
+  // 1. Submit the job
+  const payload = {
+    input: {
+      prompt: "Studio Ghibli style, dreamy watercolor, anime background",
+      init_images: [imageBase64],
+      denoising_strength: 0.6,
+      steps: 30,
+      sampler_index: "Euler a"
+    }
+  };
+
+  const requestConfig = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${RUNPOD_API_KEY}`
+    },
+    body: JSON.stringify(payload)
+  };
 
   try {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        const form = new FormData();
-        form.append('image', fs.createReadStream(tempPngPath));
-        form.append('n', 1);
-        form.append('size', '512x512');
+    const response = await fetch(RUNPOD_ENDPOINT + "/run", requestConfig);
 
-        const response = await axios.post(
-          'https://api.openai.com/v1/images/variations',
-          form,
-          {
-            headers: {
-              ...form.getHeaders(),
-              'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-            }
-          }
-        );
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
 
-        const stylizedImageUrl = response.data.data[0].url;
-        const stylizedImage = await axios.get(stylizedImageUrl, { responseType: 'arraybuffer' });
-        fs.writeFileSync(outputPath, stylizedImage.data);
-        // Clean up temp file
-        await fs.remove(tempPngPath);
-        return;
-      } catch (err) {
-        if (err.response && err.response.status === 429) {
-          const retryAfter = err.response.headers['retry-after'];
-          const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 10000;
-          console.warn(`Rate limited by OpenAI (429). Waiting ${waitTime / 1000}s before retrying...`);
-          await new Promise(res => setTimeout(res, waitTime));
-        } else {
-          console.error(`Error stylizing frame (attempt ${attempt}):`, err.message, err.response?.data);
-          if (attempt === retries) throw err;
-          await new Promise(res => setTimeout(res, 2000 * attempt));
+    const job = await response.json();
+    const jobId = job.id;
+
+    // Polling loop for job status
+    let result;
+    while (true) {
+      await new Promise((res) => setTimeout(res, 3000)); // wait 3 seconds
+    
+
+      const statusRes = await fetch(`${RUNPOD_ENDPOINT}/status/${jobId}`, {
+        headers: {
+          "Authorization": `Bearer ${RUNPOD_API_KEY}`
         }
+      });
+
+      const status = await statusRes.json();
+      console.log(status);
+      
+      if (status.status === "COMPLETED") {
+        result = status.output;
+        break;
       }
+
+      if (status.status === "FAILED") {
+        throw new Error(`RunPod job failed: ${JSON.stringify(status)}`);
+      }
+
+      console.log(`Waiting for job... Status: ${status.status}`);
     }
-  }finally {
-    // Clean up temp file
-    if (await fs.pathExists(tempPngPath)) {
-      await fs.remove(tempPngPath);
-    }
+    const imageBuffer = Buffer.from(result.images[0], 'base64');
+    fs.writeFileSync(outputPath, imageBuffer);
+  } catch (error) {
+    console.error("Error stylizing frame with RunPod:", error.message);
+    throw error;
   }
 }
